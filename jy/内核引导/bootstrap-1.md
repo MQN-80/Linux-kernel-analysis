@@ -66,5 +66,33 @@ Linux 把与硬件相关的代码全部放在 arch目录下，在这个目录下
 #define __USER_DS 0x2B ／＊用户数据段, index=5,TI=0,RPL=3＊／ 
 
 ```
-可以看出，没有定义
+可以看出，没有定义堆栈段，是因为Linux不区分堆栈段和数据段，因为没有使用LDT，因此TI=0，内核代码段和数据段具有最高特权，因此其 `RPL`为 0，而用户代码段和数据段具有最低特权，因此其 `RPL` 为 3
 
+全局描述符的定义在`arch/i386/kernel/head.S`中
+```armasm
+ENTRY（gdt_table） 
+ .quad 0x0000000000000000 /* NULL descriptor */ 
+ .quad 0x0000000000000000 /* not used */ 
+ .quad 0x00cf9a000000ffff /* 0x10 kernel 4GB code at 0x00000000 */ 
+ .quad 0x00cf92000000ffff /* 0x18 kernel 4GB data at 0x00000000 */ 
+ .quad 0x00cffa000000ffff /* 0x23 user 4GB code at 0x00000000 */ 
+ .quad 0x00cff2000000ffff /* 0x2b user 4GB data at 0x00000000 */ 
+ .quad 0x0000000000000000 /* not used */ 
+ .quad 0x0000000000000000 /* not used */ 
+ /* 
+ * The APM segments have byte granularity and their bases 
+ * and limits are set at run time. 
+ */ 
+ .quad 0x0040920000000000 /* 0x40 APM set up for bad BIOS's */ 
+ .quad 0x00409a0000000000 /* 0x48 APM CS code */ 
+ .quad 0x00009a0000000000 /* 0x50 APM CS 16 code （16 bit） */ 
+ .quad 0x0040920000000000 /* 0x58 APM DS data */ 
+ .fill NR_CPUS*4,8,0 /* space for TSS's and LDT's */ 
+```
+从代码可以看出，GDT 放在数组变量 gdt_table 中。按 Intel 规定，GDT 中的第一项为空，这是为了防止加电后段寄存器未经初始化就进入保护模式而使用 GDT 的。第二项也没用。从下标 2～5 共 4 项对应于前面的 4 种段描述符值,从描述符的数值可以得出:
+(将16进制转为2进制后与描述符具体位进行比对)
+* 段的基地址全部为 0x00000000； 
+* 段的上限全部为 0xffff； 
+* 段的粒度 G 为 1，即段长单位为 4KB； 
+* 段的 D 位为 1，即对这 4 个段的访问都为 32 位指令； 
+* 段的 P 位为 1，即 4 个段都在内存。 
