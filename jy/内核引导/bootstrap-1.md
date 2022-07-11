@@ -96,3 +96,39 @@ ENTRY（gdt_table）
 * 段的粒度 G 为 1，即段长单位为 4KB； 
 * 段的 D 位为 1，即对这 4 个段的访问都为 32 位指令； 
 * 段的 P 位为 1，即 4 个段都在内存。 
+## 分页机制
+> 80386使用4K大小的页，因此将4G字节的线性地址空间划分为1G个页面，分页机制由CR0中的PG位启用，若PG=1，启用分页机制
+### 分页机构
+1.两级页表结构(上课讲过，不多赘述)
+![两级页表](./images/6.png)
+2.页目录项32位具体含义
+* 第 31~12 位是 20 位页表地址，由于页表地址的低 12 位总为 0，所以用高 20 位指出32 位页表地址就可以了。因此，一个页目录最多包含 1024 个页表地址。 
+* 第 0 位是存在位，如果 P=1，表示页表地址指向的该页在内存中，如果 P=0，表示不在内存中。 
+* 第 1 位是读/写位，第 2 位是用户/管理员位，这两位为页目录项提供硬件保护。当特权级为 3 的进程要想访问页面时，需要通过页保护检查，而特权级为 0 的进程就可以绕过页
+保护。 
+* 第 3 位是 PWT（Page Write-Through）位，表示是否采用写透方式，写透方式就是既写内存（RAM）也写高速缓存,该位为 1 表示采用写透方式。 
+* 第 4 位是 PCD（Page Cache Disable）位，表示是否启用高速缓存，该位为 1 表示启用高速缓存。 
+* 第 5 位是访问位，当对页目录项进行访问时，A 位=1。 
+* 第 7 位是 Page Size 标志，只适用于页目录项。如果置为 1，页目录项指的是 4MB 的页面，请看后面的扩展分页。 
+* 第 9~11 位由操作系统专用，Linux 也没有做特殊之用。 
+![页目录项](./images/7.png)
+3.TLB
+## Linux下的分页机制
+> Linux定义了三种类型的页表
+* 总目录 PGD（Page Global Directory） 
+* 中间目录 PMD（Page Middle Derectory） 
+* 页表 PT（Page Table） 
+1.与页相关的数据结构和宏定义
+如上所述，可以看出PGD,PMD和PT表的表项都占4个字节，因此将他们定义为无符号长整数，分别为pgd_t,pmd_t,pte_t,定义在page.h中
+```c
+typedef struct { unsigned long pte_low; } pte_t; 
+typedef struct { unsigned long pmd; } pmd_t; 
+typedef struct { unsigned long pgd; } pgd_t; 
+typedef struct { unsigned long pgprot; } pgprot_t; 
+```
+Linux并未将这几种类型直接定义为长整数而是定义为一个结构，是为了gcc在编译时能够进行严格类型检查，此外还定义了几个宏来访问这些结构:
+```c
+#define pte_val（x） （（x）.pte_low） 
+#define pmd_val（x）（（x）.pmd） 
+#define pgd_val（x） （（x）.pgd） 
+```
