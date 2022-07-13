@@ -226,3 +226,5 @@ static inline int pgd_present（pgd_t pgd） { return 1; }
 |Mk_pte（） |把一个线性地址和一组存取权限合并来创建一个 32 位的页表表项 
 |Pte _pte_phys（） |把一个物理地址与存取权限合并来创建一个页表表项 
 |Pte _page（） |从页表表项返回页的线性地址 
+
+
