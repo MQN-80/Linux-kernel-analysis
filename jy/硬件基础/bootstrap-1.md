@@ -118,7 +118,8 @@ ENTRY（gdt_table）
 * 总目录 PGD（Page Global Directory） 
 * 中间目录 PMD（Page Middle Derectory） 
 * 页表 PT（Page Table） 
-1.与页相关的数据结构和宏定义
+
+### 1.与页相关的数据结构和宏定义
 如上所述，可以看出PGD,PMD和PT表的表项都占4个字节，因此将他们定义为无符号长整数，分别为pgd_t,pmd_t,pte_t,定义在page.h中
 ```c
 typedef struct { unsigned long pte_low; } pte_t; 
@@ -132,3 +133,98 @@ Linux并未将这几种类型直接定义为长整数而是定义为一个结构
 #define pmd_val（x）（（x）.pmd） 
 #define pgd_val（x） （（x）.pgd） 
 ```
+字段pgrot的值与页面项的低12位相对应，在`pgtalbe.h`中定义了对应的宏
+```c
+ #define _PAGE_PRESENT 0x001 
+ #define _PAGE_RW 0x002 
+ #define _PAGE_USER 0x004 
+ #define _PAGE_PWT 0x008 
+ #define _PAGE_PCD 0x010 
+ #define _PAGE_ACCESSED 0x020 
+ #define _PAGE_DIRTY0x040 
+ #define _PAGE_PSE 0x080 /* 4 MB （or 2MB） page, Pentium+, if present.. */ 
+ #define _PAGE_GLOBAL 0x100 /* Global TLB entry PPro+ */ 
+```
+从上述描述，我们也可以体会到，把标志位定义为宏而不是位段更有利于编码
+而对于页目录和页表，则是利用数组进行定义，定义在`pgtable.h`中，定义如下
+```c
+extern pgd_t swapper_pg_dir[1024]; 
+extern unsigned long pg0[1024]; 
+```
+其中swapper_pg_dir为页目录表，pg0为临时页表，每个表最多都有1024项
+
+### 2.线性地址域的定义
+lntel的线性地址的结构如下:
+![线性地址](./images/7.png)
+其线性地址的定义在`page.h`文件中，偏移量的位数如下
+```c
+ #define PAGE_SHIFT 12 
+ #define PAGE_SIZE （1UL << PAGE_SHIFT） 
+ #define PTRS_PER_PTE 1024 
+ #define PAGE_MASK （~（PAGE_SIZE-1））
+```
+其中`PAGE_SHIFT`宏定义了偏移量的位数为12，因此页大小`PAGE_SIZE`为2<sup>12</sup>=4096字节;`PTR_PER_PTE`为页表的项数;最后`PAGE_MASK`的值定义为`0xffff000`，用以屏蔽偏移量域的所有位
+
+---
+```c
+ #define PGDIR_SHIFT22 
+ #define PTRS_PER_PGD 1024 
+ #define PGDIR_SIZE （1UL << PGDIR_SHIFT） 
+ #define PGDIR_MASK （~（PGDIR_SIZE-1））
+```
+其中`PGDIR_SHIFT`是页表所能映射区域线性地址的位数，其位数为22(12位的偏移量加上10位的页表);`PTR_PER_PGD`为页目录的目录项数;`PGDIR_SIZE`为页目录的大小，为2<sup>22</sup>,即4MB;`PGDIR_MASK`为0xffc0000,用来屏蔽偏移量位和页表域的所有位
+
+---
+```c
+#define PMD_SHIFT 22 
+#define PTRS_PER_PMD
+```
+`PMD_SHIFT` 为中间目录表映射的地址位数，其值也为 22，但是因为 Linux在386中只用了两级页表结构，因此，让其目录项个数为 1，这就使得中间目录在指针序列中的位置被保存，以便同样的代码在 32 位系统和 64 位系统下都能使用。后面的讨论我们不再提及中间目录。
+## 3.对于页目录项和页表的处理
+> 在`page.h`,`pgtable.h`,`pgtable.h3`这三个文件中，还定义有大量的宏，用于对页目录，页表和表项的处理，在此介绍一些主要的宏和函数
+### 3.1 表项值的确立
+```c
+static inline int pgd_none（pgd_t pgd） { return 0; } 
+static inline int pgd_present（pgd_t pgd） { return 1; } 
+#define pte_present（x） （（x）.pte_low & （_PAGE_PRESENT | _PAGE_PROTNONE））
+```
+`pgd_none()`函数直接返回0，表示尚未为该页目录建立映射，因此页目录项为空;`pgd_present()`函数直接返回1，表示该映射虽然未建立，但页目录映射的页表仍存在于内存中。
+
+`pte_present` 宏的值为 1 或 0，表示 P 标志位。如果页表项不为 0，但标志位为 0，则表示映射已经建立，但所映射的物理页面不在内存。
+### 3.2 清除相应表的表项
+```c
+#define pgd_clear（xp） do { } while （0） 
+#define pte_clear（xp） do { set_pte（xp, __pte（0））; } while （0） 
+``` 
+`pgd_clear` 宏实际上什么也不做，定义它可能是为了保持编程风格的一致。`pte_clear`是把 0 写到页表表项中。
+
+而`set_pte`的具体定义，经查询在`page.h`中，具体代码如下:
+```c
+#define set_pte(pteptr, pteval) (*(pteptr) = pteval)
+```
+可以看出该函数的作用就是指针赋值使用
+### 3.3 对页表表项标志值进行操作的宏
+> 这些宏的定义都在`pgtable.h`文件中,下表给出宏名和定义
+
+|宏名|功能|
+|:--------|:------|
+|Set_pte（）    | 把一个具体的值写入表项
+|Pte_read（）| 返回 User/Supervisor 标志值（由此可以得知是否可以在用户态下访问此页）
+|Pte _write（）| 如果 Present 标志和 Read/Write 标志都为 1，则返回 1（此页是否存在并可写）
+|Pte _exec（） |返回 User/Supervisor 标志值 
+|Pte _dirty（） |返回 Dirty 标志的值（说明此页是否被修改过） 
+|Pte _young（） |返回 Accessed 标志的值（说明此页是否被存取过） 
+|Pte _wrprotect（） |清除 Read/Write 标志 
+|Pte _rdprotect（） |清除 User/Supervisor 标志 
+|Pte _mkwrite |设置 Read/Write 标志 
+|Pte _mkread |设置 User/Supervisor 标志 
+|Pte _mkdirty（） |把 Dirty 标志置 1 
+|Pte _mkclean（） |把 Dirty 标志置 0 
+|Pte _mkyoung 把 |Accessed 标志置 1 
+|Pte _mkold（） |把 Accessed 标志置 0 
+|Pte _modify（p,v） |把页表表项 p 的所有存取权限设置为指定的值 
+|Mk_pte（） |把一个线性地址和一组存取权限合并来创建一个 32 位的页表表项 
+|Pte _pte_phys（） |把一个物理地址与存取权限合并来创建一个页表表项 
+|Pte _page（） |从页表表项来返回页的线性地址 
+
+
