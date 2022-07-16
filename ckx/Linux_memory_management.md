@@ -435,7 +435,7 @@ static void __init free_bootmem_core（bootmem_data_t *bdata, unsigned long addr
 该函数为封装函数。
 #### __alloc_bootmem_core()函数
 * 首先，将eidx初始化为本节点中现有页面的总数，并进行条件检查。
-* 然后进行首选页的计算。
+* 然后进行首选页的计算：
 ```
 /*
 * We try to allocate bootmem pages above 'goal'
@@ -447,3 +447,96 @@ preferred = goal - bdata->node_boot_start;
 preferred = 0;
 preferred = （（preferred + align - 1） & ~（align - 1）） >> PAGE_SHIFT;
 ```
+1.如果goal为非0且有效，则给preferred赋初值，否则给preferred赋值为0。
+2.根据align对齐preferred的物理地址。然后获得所需页面的总数areasize（向上取整），根据对齐的大小选择增加值incr（对齐的大小小于4KB时，增加值为1）。
+然后通过循环从首选页面号开始，找到空闲页面号：
+```
+restart_scan:
+  for （i = preferred; i < eidx; i += incr） {
+  unsigned long j;
+    if （test_bit（i, bdata->node_bootmem_map））
+      continue;
+```
+查看首次满足内存需求后，是否还有足够的空闲页面：
+```
+for （j = i + 1; j < i + areasize; ++j） {
+  if （j >= eidx）
+    goto fail_block;
+  if （test_bit （j, bdata->node_bootmem_map））
+    goto fail_block;
+}
+```
+如果首选页面中没有满足需要的连续页面（即进入了fail_block），那么就忽略preferred的值（置0），从0开始扫描，而如果preferred为1但没有满足的足够页面，则返回NULL，具体代码如下：
+```
+fail_block:;
+}
+if （preferred） {
+  preferred = 0;
+  goto restart_scan;
+}
+return NULL;
+```
+接着进行条件检查：
+```
+/*
+* Is the next page of the previous allocation-end the start
+* of this allocation's buffer? If yes then we can 'merge'
+* the previous partial page with this allocation.
+*/
+if （align <= PAGE_SIZE && bdata->last_offset && bdata->last_pos+1 == start） {
+  offset = （bdata->last_offset+align-1） & ~（align-1）;
+  if （offset > PAGE_SIZE）
+    BUG（）;
+  remaining_size = PAGE_SIZE-offset;
+```
+本次检查主要检查：
+* 所请求对齐的值小于页的大小（4KB）。
+* 变量last_offset为非0。
+* 检查这次请求的内存是否与前一次相邻，如果是则将两次分配合并进行。
+
+如果3个条件都满足，则使用前一次分配中最后一页剩余的空间初始化remaining_size。
+如果请求内存的大小没有超过前一次分配中最后一页的剩余空间的大小，则不用分配新的页。只需增加last_offset到新的偏移量，而last_pos不变。然后把新分配的起始地址存放在变量ret中。
+而如果请求的大小大于剩余空间，则需要先求出所需页面数，然后更改last_pos和last_offset。
+#### free_all_bootmem()函数
+该函数用来引导时释放页面，并清除bootmem分配器。
+该函数为封装函数。
+#### free_all_bootmem_core()函数
+首先，将idx初始化为从内核映像结束处到内存顶点处的页面数：
+```
+struct page *page = pgdat->node_mem_map;
+bootmem_data_t *bdata = pgdat->bdata;
+unsigned long i, count, total = 0;
+unsigned long idx;
+if （!bdata->node_bootmem_map） BUG（）;
+count = 0;
+idx = bdata->node_low_pfn - （bdata->node_boot_start >> PAGE_SHIFT）;
+```
+然后搜索bootmem位图，找到空闲页，并把mem_map中对应的项标记为空闲。其中，set_page_count()函数把page结构的count域置1，而__free_page()函数则真正释放页面：
+```
+for （i = 0; i < idx; i++, page++） {
+  if （!test_bit（i, bdata->node_bootmem_map）） {
+    count++;
+    ClearPageReserved（page）;
+    set_page_count（page, 1）;
+    __free_page（page）;
+  }
+}
+```
+然后，获得bootmem位图的地址，并释放它所在的页面：
+```
+total += count;
+/*
+* Now free the allocator bitmap itself, it's not
+* needed anymore:
+*/
+page = virt_to_page（bdata->node_bootmem_map）;
+count = 0;
+for （i = 0; i < （（bdata->node_low_pfn-（bdata->node_boot_start >> PAGE_SHIFT））/8 + PAGE_SIZE-1）/PAGE_SIZE; i++,page++） {
+  count++;
+  ClearPageReserved（page）;
+  set_page_count（page, 1）;
+  __free_page（page）;
+}
+```
+最后把该存储节点的bootmem_map域置为NULL，并返回空闲页面的总数。
+### 页表的建立
