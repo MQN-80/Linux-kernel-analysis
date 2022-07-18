@@ -26,14 +26,12 @@ Linux对于实现虚拟内存的源代码大部分放在/mm目录下。根据负
 
 ### 内核空间和用户空间
 Linux虚拟空间为0~4G字节。Linux内核将这4G字节的空间分为两部分。将最高的1G字节（从虚拟地址0xC0000000到0xFFFFFFFF）供给内核使用，称为“内核空间”；又将较低的3G字节（从虚拟地址0x00000000到0xBFFFFFFF）供给各个进程使用，称为“用户空间”。
-Linux内核由系统内的所有进程共享，每个进程可以通过系统调用进入内核。Linux使用两级保护机制：0级供内核使用；3级供用户程序使用，通过对图6.3的观察，我们可以得出每个进程有各自的私有用户空间（对其他进程不可见），而最高的1G字节虚拟内核空间则为所有进程以及内核所共享。
+Linux内核由系统内的所有进程共享，每个进程可以通过系统调用进入内核。Linux使用两级保护机制：0级供内核使用；3级供用户程序使用，通过对虚拟空间结构图的观察，我们可以得出每个进程有各自的私有用户空间（对其他进程不可见），而最高的1G字节虚拟内核空间则为所有进程以及内核所共享。
 
 ![虚拟空间结构](images/6_3.jpg)
 
-* 虚拟内核空间到物理空间的映射
-内核空间中存放的是内核代码和数据，而进程的用户空间中存放的是用户程序的代码和 数据。不管是内核空间还是用户空间，它们都处于虚拟空间中。虽然内核空间占据了每个虚拟空间中的最高1G字节，但映射到物理内存却总是从最低地址（0x00000000）开始。对内核空间来说，其地址映射是很简单的线性映射，0xC0000000就是物理地址与线性地址之间的位移量，在Linux代码中就叫做PAGE_OFFSET。因此对于内核空间而言，如果物理内存小于950MB，则虚地址为x时，物理地址为“x-PAGE_OFFSET”；物理地址为x时，虚地址为“x+PAGE_OFFSET”。
-* 内核映像
-内核映像即内核的代码和数据。系统启动时将Linux内核映像安装在物理地址0x00100000开始的地方，即1MB开始的区间。而在正常运行时内核映像被放在虚拟内核空间中，因此连接程序在连接内核映像时需要在所有符号地址上加一个偏移量PAGE_OFFSET,因此内核映像在内核空间的起始地址为0xC0100000。
+* 虚拟内核空间到物理空间的映射：内核空间中存放的是内核代码和数据，而进程的用户空间中存放的是用户程序的代码和数据。不管是内核空间还是用户空间，它们都处于虚拟空间中。虽然内核空间占据了每个虚拟空间中的最高1G字节，但映射到物理内存却总是从最低地址（0x00000000）开始。对内核空间来说，其地址映射是很简单的线性映射，0xC0000000就是物理地址与线性地址之间的位移量，在Linux代码中就叫做PAGE_OFFSET。因此对于内核空间而言，如果物理内存小于950MB，则虚地址为x时，物理地址为“x-PAGE_OFFSET”；物理地址为x时，虚地址为“x+PAGE_OFFSET”。
+* 内核映像：内核映像即内核的代码和数据。系统启动时将Linux内核映像安装在物理地址0x00100000开始的地方，即1MB开始的区间。而在正常运行时内核映像被放在虚拟内核空间中，因此连接程序在连接内核映像时需要在所有符号地址上加一个偏移量PAGE_OFFSET,因此内核映像在内核空间的起始地址为0xC0100000。
 ### 虚拟内存实现机制间的关系
 Linux通过对各种实现机制的采用和联系，完成对虚拟内存的实现。总的来说，Linux的实现机制主要有以下几种：内存分配和回收机制；地址映射机制；缓存和刷新机制；请页机制；交换机制；内存共享机制。
 
@@ -540,3 +538,59 @@ for （i = 0; i < （（bdata->node_low_pfn-（bdata->node_boot_start >> PAGE_SH
 ```
 最后把该存储节点的bootmem_map域置为NULL，并返回空闲页面的总数。
 ### 页表的建立
+通过前面对内存页面管理所需的数据结构的建立，现在可以进一步完善页面映射机制，并建立起内存页面映射管理机制。
+与页表建立有关的函数主要有：
+* paging_init()函数
+* pagetable_init()函数
+
+#### paging_init()函数
+由前文可知，该函数被setup_arch()所调用，对此函数的描述如下：
+首先调用pagetable_init()函数，该函数才真正建立页表，具体描述见后文。
+然后将swapper_pg_dir（页目录）的地址装入CR3寄存器：
+```
+__asm__（ "movl %%ecx,%%cr3\n" ::"c"（__pa（swapper_pg_dir）））;
+```
+通过宏定义，__flush_tlb_all（）使转换旁路缓冲区（TLB）无效。TLB或称为页表缓冲，里面存放一些页表文件（虚拟地址到物理地址的转换表），每当页目录改变时，就需要刷新TLB：
+```
+#if CONFIG_X86_PAE
+/*
+* We will bail out later - printk doesnt work right now so
+* the user would just see a hanging kernel.
+*/
+if （cpu_has_pae）
+  set_in_cr4（X86_CR4_PAE）;
+#endif
+__flush_tlb_all（）;
+```
+注意，如果使用了CONFIG_HIGHMEM选项，就要对大于896MB的内存进行初始化。
+然后计算3个管理区的大小，并存放在zones_size数组中。
+* ZONE_DMA：从0~16MB分配。
+* ZONE_NORMAL：从16MB~896MB分配。
+* ZONE_HIGHMEM：从896MB以上分配。
+
+最后，调用free_area_init()函数初始化内存管理区并创建内存映射表：
+```
+{
+  unsigned long zones_size[MAX_NR_ZONES] = {0, 0, 0};
+  unsigned int max_dma, high, low;
+  max_dma = virt_to_phys（（char *）MAX_DMA_ADDRESS） >> PAGE_SHIFT;
+  low = max_low_pfn;
+  high = highend_pfn;
+if （low < max_dma)
+  zones_size[ZONE_DMA] = low;
+else {
+  zones_size[ZONE_DMA] = max_dma;
+  zones_size[ZONE_NORMAL] = low - max_dma;
+#ifdef CONFIG_HIGHMEM
+  zones_size[ZONE_HIGHMEM] = high - low;
+#endif
+}
+free_area_init（zones_size）;
+}
+return;
+```
+#### pagetable_init()函数
+该函数负责在页目录swapper_pg_dir中建立页表，具体描述如下：
+```
+unsigned long vaddr, end; pgd_t *pgd, *pgd_base; int i, j, k; pmd_t *pmd; pte_t *pte, *pte_base; /* * This can be zero as well - no problem, in that case we exit * the loops anyway due to the PTRS_PER_* conditions. */ end = （unsigned long）__va（max_low_pfn*PAGE_SIZE）;
+```
