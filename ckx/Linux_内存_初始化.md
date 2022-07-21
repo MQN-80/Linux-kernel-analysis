@@ -1,45 +1,5 @@
-﻿# Linux内存管理
-存储器是许多存储单元的集合，是用来存储程序和各种数据信息的记忆部件。它能够为用户提供方便、安全和充分大的存储空间，因此对于存储器，系统必须对其进行仔细管理。一个存储器的质量可以通过其容量、访问速度和价格来度量。但由于技术限制，目前并没有一种无穷大的、访问快速的、内容不丢失的以及廉价的存储器。因此，当今大部分计算机都采用层次结构的思想将存储器组成多层存储器，并通过管理软件和辅助硬件等有机组合成统一的整体，使存放的程序和数据按层次分布各存储器中，具体方案为少量快速、昂贵、易变的高速缓存；若干兆字节的中等速度、中等价格、易变的主存储器（RAM）；以及数百兆或数千兆的低速、廉价、不易变的磁盘。资源的合理利用与否关系着系统的效率。
-存储器的层次结构图解如图所示：
-
-![层次结构图](images/6_1.jpg)
-
-
-本部分主要对Linux内存管理部分的代码进行分析，包括其所涉及到的许多机制：比如内存的初始化机制、地址映射机制、请页机制、交换机制、内存分配和回收机制、缓存和刷新机制以及内存共享机制，还包括进程的创建与执行。
-## Linux内存管理概述
-Linux是为多用户多任务所设计的操作系统，因此在对于资源使用方面，存储资源有可能被多个进程有效共享；而且程序规模随发展而不断膨胀，如今计算机所需求的内存空间越来越大。因此Linux内存管理的设计选择利用计算机系统所提供的虚拟存储技术，从而实现了虚拟存储器管理。
-Linux的内存管理主要体现在对虚拟内存的管理上，因此我们把Linux虚拟内存管理功能划分为以下几点：
-* 大地址空间
-* 进程保护
-* 内存映射
-* 公平的物理内存分配
-* 共享虚拟内存
-### Linux虚拟内存的实现结构
-Linux对于实现虚拟内存的源代码大部分放在/mm目录下。根据负责功能的不同，我们可以将其分为以下四个模块：
-* 内存映射模块（mmap）：该模块负责把磁盘文件的逻辑地址映射到虚拟地址，以及把虚拟地址映射到物理地址。
-* 交换模块（swap）：该模块负责控制内存内容的换入和换出，它通过交换机制，使得在物理内存的页面（RAM页）中保留有效的页，即从主存中淘汰最近没被访问的页，保存近来访问过的页。
-* 核心内存管理模块（core）：该模块负责核心内存管理功能，即对页的分配、回收、释放和请页处理等，这些功能将被别的内核子系统所使用。
-* 结构特定模块：该模块负责给各种硬件平台提供通用接口，这个模块通过执行命令来改变硬件MMU的虚拟地址映射，并在发生页错误时，提供公用方法来通知别的内核子系统。该模块是实现虚拟内存的物理基础。
-基于以上模块，我们画出Linux虚拟内存整体结构如图所示：
-
-![虚拟内存实现结构](images/6_2.jpg)
-
-### 内核空间和用户空间
-Linux虚拟空间为0~4G字节。Linux内核将这4G字节的空间分为两部分。将最高的1G字节（从虚拟地址0xC0000000到0xFFFFFFFF）供给内核使用，称为“内核空间”；又将较低的3G字节（从虚拟地址0x00000000到0xBFFFFFFF）供给各个进程使用，称为“用户空间”。
-Linux内核由系统内的所有进程共享，每个进程可以通过系统调用进入内核。Linux使用两级保护机制：0级供内核使用；3级供用户程序使用，通过对虚拟空间结构图的观察，我们可以得出每个进程有各自的私有用户空间（对其他进程不可见），而最高的1G字节虚拟内核空间则为所有进程以及内核所共享。
-
-![虚拟空间结构](images/6_3.jpg)
-
-* 虚拟内核空间到物理空间的映射：内核空间中存放的是内核代码和数据，而进程的用户空间中存放的是用户程序的代码和数据。不管是内核空间还是用户空间，它们都处于虚拟空间中。虽然内核空间占据了每个虚拟空间中的最高1G字节，但映射到物理内存却总是从最低地址（0x00000000）开始。对内核空间来说，其地址映射是很简单的线性映射，0xC0000000就是物理地址与线性地址之间的位移量，在Linux代码中就叫做PAGE_OFFSET。因此对于内核空间而言，如果物理内存小于950MB，则虚地址为x时，物理地址为“x-PAGE_OFFSET”；物理地址为x时，虚地址为“x+PAGE_OFFSET”。
-* 内核映像：内核映像即内核的代码和数据。系统启动时将Linux内核映像安装在物理地址0x00100000开始的地方，即1MB开始的区间。而在正常运行时内核映像被放在虚拟内核空间中，因此连接程序在连接内核映像时需要在所有符号地址上加一个偏移量PAGE_OFFSET,因此内核映像在内核空间的起始地址为0xC0100000。
-### 虚拟内存实现机制间的关系
-Linux通过对各种实现机制的采用和联系，完成对虚拟内存的实现。总的来说，Linux的实现机制主要有以下几种：内存分配和回收机制；地址映射机制；缓存和刷新机制；请页机制；交换机制；内存共享机制。
-
-![实现机制间关系](images/6_4.jpg)
-
-在虚拟内存的实现过程中，内存管理程序首先通过映射机制把用户程序的逻辑地址映射到物理地址，如果没有对应的物理内存，就发出请页要求（过程1），如果内存有空间，则进行分配（过程2），并把物理页记录页缓存中（过程3）；如果内存无空间，则进行交换（过程4,5）。另外，在找寻物理页的过程中也会使用地址映射机制（过程8）、交换机制中也会用到交换缓存（过程6）、交换后也会修改页表来映射文件地址（过程7）。
-## Linux内存初始化
-### 启用分页机制
+﻿# Linux内存初始化
+## 启用分页机制
 1.关于Linux页表初步初始化的代码如下：
 ```
 /*
@@ -144,10 +104,10 @@ jmp *%eax  /* make sure eip is relocated */
 ![内核映像在物理内存的分布](images/6_7.jpg)
 
 其中的_text对应物理地址0X00100000，表示内核代码的第一个字节地址。_etext对应内核代码的结束位置。在内核数据中，分为已初始化的数据和未初始化的数据，其中初始化的数据紧跟在_etext后，在_edata处结束；而未初始化的数据结束符为_end。表示整个内核映像的结束。
-### 物理内存的探测
+## 物理内存的探测
 Linux系统通过内核本身进行资源的扫描探测，并根据获得的信息生成物理内存构成图，即e820图，然后通过参数块传给内核。这样，内核就知道系统的内存资源配置情况。
 前面提到分页机制启用，在这之后与内存管理相关的操作就是调用init/main.c中的start_kernel()函数，而该函数需要调用setup_arch()函数（位于arch/i386/sernel/setup.c中），我们通过分析该函数来了解物理内存探测内容。
-#### setup_arch()函数
+### setup_arch()函数
 在分析之前，我们先列出代码中需要用到的一些宏定义：
 ```
 #define PFN_UP（x） （（（x） + PAGE_SIZE-1） >> PAGE_SHIFT）
@@ -168,12 +128,15 @@ Linux系统通过内核本身进行资源的扫描探测，并根据获得的信
 * MAX_NONPAE_PFN：给出在4GB之上第1个页面的页面号。当页面扩充（PAE）功能启用时才能访问4GB以上的内存。
 
 1.首先该函数调用setup_memory_region()函数，处理内存构成图并把内存分布信息存放在全局变量e820中（详细描述见下文）。
+
 2.然后调用parse_mem_cmdline(cmdline_p)函数，该函数用来分析命令行中的选择项，并据此对数据结构e820中的内容作出修正，其代码也在setup.c中。
+
 3.然后获得内核映像之后的起始页面号：
 ```
 start_pfn = PFN_UP（__pa（&_end））;
 ```
 start_pfn存放着内核映像之后的页面号。
+
 4.接着找出可用的最高页面号：
 ```
 max_pfn = 0;
@@ -191,6 +154,7 @@ for （i = 0; i < e820.nr_map; i++） {
 }
 ```
 该部分代码循环查找类型为E820_RAM的内存区，并把最后一个页面的页面号存放在max_pfn中。
+
 5.确定最高和最低内存的范围：
 ```
 max_low_pfn = max_pfn;
@@ -217,6 +181,7 @@ printk（KERN_WARNING "Warning only %ldMB will be used.\n", MAXMEM>>20）;
 该代码用来检查系统物理内存大小的情况，根据内存情况不同做出不同操作：
 如果物理内存RAM大于896MB，小于4GB，则选用CONFIG_HIGHMEM选项来访问；
 如果大于4GB，则选用CONFIG_X86_OAE。
+
 6.调用init_bootmem()函数，为物理内存页面管理机制的建立做初步准备。
 ```
 bootmap_size = init_bootmem（start_pfn, max_low_pfn）;
@@ -227,28 +192,36 @@ bootmem分配器负责登记全部低区（0~896MB）的可用RAM页面，并调
 reserve_bootmem（HIGH_MEMORY, （PFN_PHYS（start_pfn） + bootmap_size + PAGE_SIZE-1） - （HIGH_MEMORY））;
 ```
 该函数将内核和bootmem位图所占的内存标记为“保留”。
+
 7.初始化分页机制
 ```
 paging_init（）;
 ```
 该函数初始化分页内存管理所需的数据结构。
-#### setup_memory_region()函数
+### setup_memory_region()函数
 该函数用来处理BIOS的内存构成图，并将图拷贝到全局变量e920中。若失败则创建一个伪内存构成图。
+
 1.调用sanitize_e820_map()函数，以删除内存构成图中任何重叠的部分，因为BIOS所报告的内存构成图可能有重叠。
+
 2.调用copy_e820_map()进行实际的拷贝。
+
 3.如果操作失败，创建一个伪内存构成图，这个伪构成图有两部分：0到640K及1M到最大物理内存。
+
 4.打印最终的内存构成图。
-#### copy_e820_map()函数
+### copy_e820_map()函数
 该函数为将内存构成图拷贝到e820中。它每次从BIOS构成图中取出一项进行检查。对于BIOS把640KB~1MB之间的区间作为RAM使用的情况，该函数需要进行修正，将涉及该位置的区间拆开成两个区间，中间跳过该部分。
-#### add_memory_region()函数
+### add_memory_region()函数
 该函数功能为在e820中增加一项。操作流程为：
+
 1.先获取e820中现有的内存区数。
+
 2.如果区数已经达到最大（32），则报错。
+
 3.如果未达到最大，则增加1项。
-#### print_memory_map()函数
+### print_memory_map()函数
 该函数负责把内存构成图输出在控制台中。
-### 物理内存的描述
-#### 一致存储结构（UMA）和非一致存储结构（NUMA）
+## 物理内存的描述
+### 一致存储结构（UMA）和非一致存储结构（NUMA）
 一致存储结构（Uniform Memory Architecture）是指计算机结构中整个物理内存都是均匀一致的，CPU访问各个空间所需要的时间都相同。这也是传统的计算机所选的结构。
 然而，在一些新的系统结构中，这种一致性反而会造成一定的问题。以多CPU结构为例，系统中有一条总线，多个CPU模块连接在系统总线上，这样每个CPU就能在拥有本地物理内存的基础上通过总线访问其他CPU的内存。这时，对于某个CPU而言，访问其本地的内存速度是最快的，而访问其他内存就会相对较慢，而且还面临因可能的竞争而引起的不确定性。这就导致存取速度不一致，所以为“非一致存储结构”。
 Linux内核提供了对NUMA的支持。为了对其进行描述，Linux引入了“存储节点”的概念，即访问时间相同的存储空间。一般情况下，把连续的物理页面分配在相同的存储节点上，如果遇到需要分配的页面数大于存储空间的情况，则把页面全部分配在公用模块上。
@@ -258,7 +231,7 @@ Linux把物理内存划分为3个层次来管理
 * 存储节点（Node）
 
 我们分别对以上层次进行说明
-#### 页面（Page）
+### 页面（Page）
 通过对/include/linux/mm.h部分代码的分析，我们将物理页面的描述展示如下：
 ```
 typedef struct page {
@@ -282,7 +255,7 @@ extern mem_map_t * mem_map；
 * 结构尽量把联系紧密的若干域存放在一起，因为这些域被放在同一缓冲行时几乎可以同时存取。
 * 每个物理页面都有一个mem_map_t结构。系统在初始化阶段根据内存大小建立一个该结构的数组mem_map，下标就是内存中物理页面的序号。
 
-#### 管理区（Zone）
+### 管理区（Zone）
 管理区又分为3个区：
 * 供DMA使用的ZONE_DMA区（小于16MB）
 * ZONE_NORMAL区（大于16MB小于896MB）
@@ -293,7 +266,7 @@ extern mem_map_t * mem_map；
 * 部分CPU不提供单独的MMU作为页式存储管理的硬件支持，而是直接在CPU内部实现，所以DMA对内存的访问不经过MMU提供的地址映射。这样外部设备就能直接访问物理页面的地址。而有些外设要求用于DMA的物理地址不能过高。
 * DMA控制器不能依靠MMU将连续的虚拟存储页面映射到物理上也连续的页面上，而DMA所需的缓冲区超过一个物理页面大小时必须要求两个物理页面在物理上连续。因此，用于DMA的物理页面必须单独管理。
 
-#### 存储节点（Node）
+### 存储节点（Node）
 查询Include/linux/mmzone.h中的代码可知，存储节点的定义为：
 ```
 typedef struct pglist_data {
@@ -319,7 +292,7 @@ typedef struct zonelist_struct {
 } zonelist_t
 ```
 zone[]数组中每个元素按照次序指向具体的页面管理区，表示分配页面时先试zone[0]所指向的管理区，如果不满足就转向zone[1]。
-### 页面管理机制的初步建立
+## 页面管理机制的初步建立
 bootmem分配器用于在系统引导时为整个物理内存建立一个页面位图,用来统计哪些物理页面可以动态分配。以此为页面管理机制作出初步准备，位图的数据结构为：
 ```
 typedef struct bootmem_data {
@@ -338,7 +311,7 @@ typedef struct bootmem_data {
 * last_pos：前一次分配的最后一个页面的页面号。
 
 除定义之外，mm/bootmeme.c中还有一些与bootmem相关的函数，在此一并列出。
-#### init_bootmem()函数
+### init_bootmem()函数
 该函数在初始化建立bootmem分配器时使用。
 ```
 unsigned long __init init_bootmem （unsigned long start, unsigned long pages）
@@ -355,7 +328,7 @@ int numnodes = 1; /* Initialized for UMA platforms */
 static bootmem_data_t contig_bootmem_data;
 pg_data_t contig_page_data = { bdata: &contig_bootmem_data };
 ```
-#### init_bootmem_core()函数
+### init_bootmem_core()函数
 ```
 static unsigned long __init init_bootmem_core （pg_data_t *pgdat, unsigned long mapstart, unsigned long start, unsigned long end）
 {
@@ -384,10 +357,10 @@ static unsigned long __init init_bootmem_core （pg_data_t *pgdat, unsigned long
 * 初始化所有被保留的页面，即把页面中所有位都置为1。
 * 返回位图的大小。
 
-#### free_bootmem()函数
+### free_bootmem()函数
 该函数负责将给定范围的页面标记为空闲（也就是把位图中某些位清0），表示相应的物理内存可以投入分配。
 该函数为封装函数，实际工作由free_bootmem_core()函数完成。
-#### free_bootmem_core()函数
+### free_bootmem_core()函数
 ```
 static void __init free_bootmem_core（bootmem_data_t *bdata, unsigned long addr, unsigned long size）
 {
@@ -419,19 +392,19 @@ static void __init free_bootmem_core（bootmem_data_t *bdata, unsigned long addr
 * start初始化为第一个页面的页面号，sidx初始化为相当于node_boot_start的页面号
 * 将位图中从sidx到eidx的所有位都标记为可用。
 
-#### reserve_bootmem()函数
+### reserve_bootmem()函数
 该函数用来保留页面。即在bootmem位图中把该页面相应位置为1。
 该函数为封装函数。
-#### reserve_bootmem_core()函数
+### reserve_bootmem_core()函数
 主要功能为将位图中从sidx到eidx的所有位置1。
 其中：
 * sidx初始化为相当于node_boot_start的页面号。
 * eidx初始化为页面总数（向上取整）。
 
-#### __alloc_bootmem()函数
+### __alloc_bootmem()函数
 该函数以循环轮转的方式从不同节点分配页面。
 该函数为封装函数。
-#### __alloc_bootmem_core()函数
+### __alloc_bootmem_core()函数
 * 首先，将eidx初始化为本节点中现有页面的总数，并进行条件检查。
 * 然后进行首选页的计算：
 ```
@@ -446,7 +419,9 @@ preferred = 0;
 preferred = （（preferred + align - 1） & ~（align - 1）） >> PAGE_SHIFT;
 ```
 1.如果goal为非0且有效，则给preferred赋初值，否则给preferred赋值为0。
+
 2.根据align对齐preferred的物理地址。然后获得所需页面的总数areasize（向上取整），根据对齐的大小选择增加值incr（对齐的大小小于4KB时，增加值为1）。
+
 然后通过循环从首选页面号开始，找到空闲页面号：
 ```
 restart_scan:
@@ -495,10 +470,10 @@ if （align <= PAGE_SIZE && bdata->last_offset && bdata->last_pos+1 == start） 
 如果3个条件都满足，则使用前一次分配中最后一页剩余的空间初始化remaining_size。
 如果请求内存的大小没有超过前一次分配中最后一页的剩余空间的大小，则不用分配新的页。只需增加last_offset到新的偏移量，而last_pos不变。然后把新分配的起始地址存放在变量ret中。
 而如果请求的大小大于剩余空间，则需要先求出所需页面数，然后更改last_pos和last_offset。
-#### free_all_bootmem()函数
+### free_all_bootmem()函数
 该函数用来引导时释放页面，并清除bootmem分配器。
 该函数为封装函数。
-#### free_all_bootmem_core()函数
+### free_all_bootmem_core()函数
 首先，将idx初始化为从内核映像结束处到内存顶点处的页面数：
 ```
 struct page *page = pgdat->node_mem_map;
@@ -537,13 +512,13 @@ for （i = 0; i < （（bdata->node_low_pfn-（bdata->node_boot_start >> PAGE_SH
 }
 ```
 最后把该存储节点的bootmem_map域置为NULL，并返回空闲页面的总数。
-### 页表的建立
+## 页表的建立
 通过前面对内存页面管理所需的数据结构的建立，现在可以进一步完善页面映射机制，并建立起内存页面映射管理机制。
 与页表建立有关的函数主要有：
 * paging_init()函数
 * pagetable_init()函数
 
-#### paging_init()函数
+### paging_init()函数
 由前文可知，该函数被setup_arch()所调用，对此函数的描述如下：
 首先调用pagetable_init()函数，该函数才真正建立页表，具体描述见后文。
 然后将swapper_pg_dir（页目录）的地址装入CR3寄存器：
@@ -589,8 +564,85 @@ free_area_init（zones_size）;
 }
 return;
 ```
-#### pagetable_init()函数
+### pagetable_init()函数
 该函数负责在页目录swapper_pg_dir中建立页表，具体描述如下：
+首先计算max_low_pfn（物理内存顶点所在的页面号）的虚拟地址，并存放在end中：
 ```
-unsigned long vaddr, end; pgd_t *pgd, *pgd_base; int i, j, k; pmd_t *pmd; pte_t *pte, *pte_base; /* * This can be zero as well - no problem, in that case we exit * the loops anyway due to the PTRS_PER_* conditions. */ end = （unsigned long）__va（max_low_pfn*PAGE_SIZE）;
+unsigned long vaddr, end;
+pgd_t *pgd, *pgd_base;
+int i, j, k;
+pmd_t *pmd;
+pte_t *pte, *pte_base;
+/*
+* This can be zero as well - no problem, in that case we exit
+* the loops anyway due to the PTRS_PER_* conditions.
+*/
+end = （unsigned long）__va（max_low_pfn*PAGE_SIZE）;
 ```
+然后让pgd_base（页目录基地址）指向swapper_pg_dir：
+```
+pgd_base = swapper_pg_dir;
+```
+如果PAE（页面扩充）被激活，PTRS_PER_PGD就为4，且变量swapper_pg_dir用作页目录指针表：
+```
+#if CONFIG_X86_PAE
+for （i = 0; i < PTRS_PER_PGD; i++）
+  set_pgd（pgd_base + i, __pgd（1 + __pa（empty_zero_page）））;
+#endif
+```
+其中，宏set_pgd()定义于include/asm-i386/pgtable-3level.h中。
+宏__pgd_offset()在给定地址的页目录中检索相应的下标。因此__pgd_offset(PAGE_OFFSET)返回内核地址空间开始处的下标（即0x300），因此pgd指向页表目录第768项：
+```
+i = __pgd_offset（PAGE_OFFSET）;
+pgd = pgd_base + i;
+```
+然后，计算虚地址vaddr，并检查它是否到了虚拟空间的顶部：
+```
+for （; i < PTRS_PER_PGD; pgd++, i++） {
+  vaddr = i*PGDIR_SIZE;
+  if （end && （vaddr >= end））
+  break;
+```
+其中：
+* PTRS_PER_PGD：一般情况下为页目录的项数（即1024），而使用了CONFIG_X86_PAE后则为4。
+* PGDIR_SIZE：一个单独的页目录所能映射的RAM总量，在两级页目录中为4MB，使用CONFIG_X86_PAE时为1GB。
+
+如果使用了CONFIG_X86_PAE选项，则分配一页（4KB）的内存给bootmem分配器使用，以保存中间页目录，并在总目录中设置它的地址。否则，没有中间页目录，就把中间页目录直接映射到总目录：
+```
+#if CONFIG_X86_PAE
+  pmd = （pmd_t *） alloc_bootmem_low_pages（PAGE_SIZE）;
+  set_pgd（pgd, __pgd（__pa（pmd） + 0x1））;
+#else
+  pmd = （pmd_t *）pgd;
+#endif
+```
+然后开始填充页目录（如果有PAE，就填充中间页目录）。计算表项映射的虚地址，如果没有PAE，则PMD_SIZE为0，vaddr=i*4MB。接下来需要检查PSE是否可用，如果可用就直接使用4MB的页而不是页表。宏cpu_has_pse()用来检查处理器是否有扩展页，如果有就用宏set_in_cr4()启用：
+```
+if （pmd != pmd_offset（pgd, 0））
+BUG（）;
+for （j = 0; j < PTRS_PER_PMD; pmd++, j++） {
+vaddr = i*PGDIR_SIZE + j*PMD_SIZE;
+if （end && （vaddr >= end））
+break;
+if （cpu_has_pse） {
+unsigned long __pe;
+set_in_cr4（X86_CR4_PSE）;
+boot_cpu_data.wp_works_ok = 1;
+__pe = _KERNPG_TABLE + _PAGE_PSE + __pa（vaddr）;
+/* Make it "global" too if supported */
+if （cpu_has_pge） {
+set_in_cr4（X86_CR4_PGE）;
+__pe += _PAGE_GLOBAL;
+}
+set_pmd（pmd, __pmd（__pe））;
+continue;
+}
+```
+而如果没有PSE，就执行：
+```
+pte_base = pte = （pte_t *）
+alloc_bootmem_low_pages（PAGE_SIZE）;
+```
+它为一个页表（4KB）分配空间。
+
+
