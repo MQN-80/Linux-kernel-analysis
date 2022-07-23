@@ -644,5 +644,288 @@ pte_base = pte = （pte_t *）
 alloc_bootmem_low_pages（PAGE_SIZE）;
 ```
 它为一个页表（4KB）分配空间。
+一个页表中有1024个表项（如果启用PAE就是512个），每个表项映射4KB（1页）。
+前面求出了每个页表项的虚地址vaddr，现在通过__pa(vaddr)求出其物理地址，再通过宏mk_pte_phys(__pa（vaddr）, PAGE_KERNEL)创建页表项，PAGE_KERNEL表示只有在内核态才能访问该页表项。
+然后通过set_pmd()把该页表追加到中间页目录中。该过程会一直持续，直到所有的物理内存都映射到从PAGE_OFFSET开始的虚拟地址空间。
+
+## 内存管理区
+已知物理内存被划分为3个区进行管理，分别是ZONE_DMA、ZONE_NOMAL和ZONE_HIGHMEM。每个区都用struct zone_struct结构表示，定义于include/linux/mmzone.h内，具体代码为：
+```
+typedef struct zone_struct {
+/*
+* Commonly accessed fields:
+*/
+  spinlock_t lock;
+  unsigned long free_pages;
+  unsigned long pages_min, pages_low, pages_high;
+  int need_balance;
+/*
+* free areas of different sizes
+*/
+  free_area_t free_area[MAX_ORDER];
+/*
+* Discontig memory support fields.
+*/
+  struct pglist_data *zone_pgdat;
+  struct page *zone_mem_map;
+  unsigned long zone_start_paddr;
+  unsigned long zone_start_mapnr;
+/*
+* rarely used fields:
+*/
+  char *name;
+  unsigned long size;
+} zone_t;
+#define ZONE_DMA 0
+#define ZONE_NORMAL 1
+#define ZONE_HIGHMEM 2
+#define MAX_NR_ZONES 3
+```
+其中的每个域定义如下：
+* lock：用来保证对该结构中其他域的串行访问。
+* free_pages：该区现有空闲页的个数。
+* pages_min、pages_low、pages_high：对该区最少、次少、最多页面个数的描述。
+* need_balance：与kswapd合并使用。
+* free_area：在伙伴分配系统中的位图数组和页面链表。
+* zone_pgdat：本管理区所在的存储节点。
+* zone_mem_map：该管理区的内存映射表。
+* zone_start_paddr：该管理区的起始物理地址。
+* zone_start_mapnr：在mem_map中的索引。
+* name：管理区名字。
+* size：管理区物理内存总大小。
+* free_area_t：一组“空闲区间”链表。
+
+其中，free_area_t定义为：
+```
+#difine MAX_ORDER 10
+  type struct free_area_struct {
+    struct list_head free_list
+      unsigned int *map
+} free_area_t
+```
+之所以为“一组”，是因为常常需要成块地在物理空间分配连续的多个页面，这样就得按块的大小分别加以管理。
+内存中每个物理页面都有一个struct page结构，该结构的代码前文已经给出，但为了方便描述，再次给出：
+```
+typedef struct page {
+  struct list_head list; 
+  struct address_space *mapping; 
+  unsigned long index; 
+  struct page *next_hash;
+  atomic_t count; 
+  unsigned long flags; 
+  struct list_head lru; 
+  wait_queue_head_t wait; 
+  struct page **pprev_hash; 
+  struct buffer_head * buffers; 
+  void *virtual; 
+  struct zone_struct *zone; 
+} mem_map_t;
+```
+
+其中
+* list：指向链表下一页。
+* mapping：指定正在映射的索引节点（inode）。
+* index：在映射表中的偏移。
+* next_hash：指向页高速缓存哈希表中下一个共享的页。
+* count：引用该页的个数。
+* flags：页面各种不同的属性。
+* Iru：用在active_list中。
+* wait：等待这一页的页队列。
+* pprev_hash：与next_hash对应。
+* buffers：把缓冲区映射到一个磁盘块。
+* zone：页所在的内存管理区。
+
+与内存管理区相关的3个主要函数为：
+* free_area_init()函数
+* build_zonelists()函数
+* mem_init()函数
+
+下文将逐一描述。
+### free_area_init()函数
+该函数用来初始化内存管理区并建立内存映射表，定义于mm/page_alloc.c中。
+该函数为封装函数，真正实现为free_area_init_core()函数。
+该函数具体描述为：
+1.检查该管理区的起始地址是否是一个页的边界:
+```
+struct page *p;
+unsigned long i, j;
+unsigned long map_size;
+unsigned long totalpages, offset, realtotalpages;
+const unsigned long zone_required_alignment = 1UL << （MAX_ORDER-1）;
+if （zone_start_paddr & ~PAGE_MASK）
+BUG（）;
+```
+2.计算本存储节点中页面的个数：
+```
+totalpages = 0;
+for （i = 0; i < MAX_NR_ZONES; i++） {
+unsigned long size = zones_size[i];
+totalpages += size;
+}
+```
+3.打印除空洞外的实际页面数：
+```
+realtotalpages = totalpages;
+if （zholes_size）
+for （i = 0; i < MAX_NR_ZONES; i++）
+realtotalpages -= zholes_size[i];
+printk（"On node %d totalpages: %lu\n", nid, realtotalpages）;
+```
+4.初始化循环链表：
+```
+INIT_LIST_HEAD（&active_list）;
+INIT_LIST_HEAD（&inactive_list）;
+```
+5.给局部内存（即本节点中的内存）映射分配空间，并在sizeof(mem_map_t)边界上对齐它：
+```
+/*
+* Some architectures （with lots of mem and discontinous memory * maps） have to search for a good mem_map area:
+* For discontigmem, the conceptual mem map array starts from
+* PAGE_OFFSET, we need to align the actual array onto a mem map
+* boundary, so that MAP_NR works.
+*/
+map_size = （totalpages + 1）*sizeof（struct page）;
+if （lmem_map == （struct page *）0） {
+lmem_map = （struct page *）
+alloc_bootmem_node（pgdat, map_size）;
+lmem_map = （struct page *）（PAGE_OFFSET + MAP_ALIGN（（unsigned long）lmem_map - PAGE_OFFSET））;
+}
+```
+6.初始化本节点的域：
+```
+*gmap = pgdat->node_mem_map = lmem_map;
+pgdat->node_size = totalpages;
+pgdat->node_start_paddr = zone_start_paddr;
+pgdat->node_start_mapnr = （lmem_map - mem_map）;
+pgdat->nr_zones = 0;
+```
+7.检查所有的页，先把页的使用计数（count）置0；然后把页标记为保留；然后初始化该页的等待队列；最后初始化链表指针：
+```
+/*
+* Initially all pages are reserved - free ones are freed
+* up by free_all_bootmem（） once the early boot process is
+* done.
+*/
+for （p = lmem_map; p < lmem_map + totalpages; p++） {
+set_page_count（p, 0）;
+SetPageReserved（p）;
+init_waitqueue_head（&p->wait）; 
+memlist_init（&p->list）;
+}
+```
+8.变量mem_map是类型为struct pages的全局稀疏矩阵。mem_map下标的起始值取决于第一个节点的第一个管理区。如果第一个管理区的起始地址为0，则下标就从0开始，并且与物理页面号相对应，也就是说，页面号就是mem_map的下标。每一个管理区都有自己的映射 表，存放在zone_mem_map中，每个管理区又被映射到它所在的节点node_mem_map中，而每个节点又被映射到管理全局内存的mem_map中。因此：
+```
+offset = lmem_map - mem_map;
+```
+offset表示该节点放的内存映射表在全局mem_map中的入口点（下标）。在这里offset为0（i386上只有一个节点）。
+
+9.然后对zone的域进行初始化：
+```
+for （j = 0; j < MAX_NR_ZONES; j++） {
+zone_t *zone = pgdat->node_zones + j;
+unsigned long mask;
+unsigned long size, realsize;
+realsize = size = zones_size[j];
+if （zholes_size）
+realsize -= zholes_size[j];
+printk（"zone（%lu）: %lu pages.\n", j, size）;
+zone->size = size;
+zone->name = zone_names[j];
+zone->lock = SPIN_LOCK_UNLOCKED;
+zone->zone_pgdat = pgdat;
+zone->free_pages = 0;
+zone->need_balance = 0;
+if （!size）
+continue;
+pgdat->nr_zones = j+1;
+mask = （realsize / zone_balance_ratio[j]）;
+if （mask < zone_balance_min[j]）
+mask = zone_balance_min[j];
+else if （mask > zone_balance_max[j]）
+mask = zone_balance_max[j];
+zone->pages_min = mask;
+zone->pages_low = mask*2;
+zone->pages_high = mask*3;
+zone->zone_mem_map = mem_map + offset;
+zone->zone_start_mapnr = offset;
+zone->zone_start_paddr = zone_start_paddr;
+if （（zone_start_paddr >> PAGE_SHIFT） & （zone_required_alignment-1））
+printk（"BUG: wrong zone alignment, it will crash\n"）;
+for （i = 0; i < size; i++） {
+struct page *page = mem_map + offset + i;
+page->zone = zone;
+if （j != ZONE_HIGHMEM）
+page->virtual = __va（zone_start_paddr）;
+zone_start_paddr += PAGE_SIZE;
+}
+offset += size;
+for （i = 0; ; i++） {
+unsigned long bitmap_size;
+memlist_init（&zone->free_area[i].free_list）;
+if （i == MAX_ORDER-1） {
+zone->free_area[i].map = NULL;
+break;
+}
+bitmap_size = （size-1） >> （i+4）;
+bitmap_size = LONG_ALIGN（bitmap_size+1）;
+zone->free_area[i].map = （unsigned long *） alloc_bootmem_node（pgdat, bitmap_size）;
+}
+}
+```
+该段代码的流程为：
+* 由于管理区的实际数据存储在节点中，因此让指针指向正确的管理区，并获得管理区的大小并打印。
+* 初始化管理区中的各个域（如果一个管理区的大小为0，就不用进行进一步初始化了）。
+* 计算合适的平衡比率。
+* 设置该管理区中页面数量的几个界限，并把在全局变量mem_map中的入口点作为zone_mem_map的初值。用mem_map的下标初始化变量zone_start_mapnr。
+* 对管理区中的每一页进行处理。首先把struct page中的zone域初始化为指向该管理区，如果该管理区不是ZONE_HIGHMEM则设置该页的虚地址，即建立起每一页物理地址到虚地址的映射。
+* 把offset增加size，即让offset指向mem_map中下一个管理区的起始位置。
+* 初始化free_area[]链表，把其最后一个序号的位图置NULL。
+* 计算位图大小，然后调用alloc_bootmem_node给位图分配空间。
+
+最后，在节点中为不同的管理区建立链表：
+```
+build_zonelists（pgdat）;
+```
+### build_zonelists()函数
+上文提到，该函数为不同的管理区建立链表。
+* 初始化节点中指向管理区链表的域为空。
+* 把当前管理区掩码与3个可用管理区掩码相“与”，获得管理区标识：
+* 给定的管理区掩码指定了优先顺序，通过掩码确定管理区链表包含哪些区：如果为__GFP_DMA，则仅包含DMA管理区；如果为__GFP_HIGHMEM，则有ZONE_HIGHMEM、ZONE_NORMAL、ZONE_DMA。
+* 用NULL结束链表。
+
+### mem_init()函数
+该函数由start_kernel()调用，以对管理区的分配算法进行进一步的初始化，定义于arch/i386/mm/init.c中：
+1.首先检查HIGHMEM是否被激活，如果被激活就得获取HIGHMEM的起始地址和总的页面数；否则，页面数就为常规内存的页面数：
+```
+int codesize, reservedpages, datasize, initsize;
+int tmp;
+int bad_ppro;
+if （!mem_map）
+BUG（）;
+#ifdef CONFIG_HIGHMEM
+highmem_start_page = mem_map + highstart_pfn;
+max_mapnr = num_physpages = highend_pfn;
+#else
+max_mapnr = num_physpages = max_low_pfn;
+#endif
+```
+2.获得低区内存中最后一个页面的虚地址：
+```
+high_memory = （void *） __va（max_low_pfn * PAGE_SIZE）;
+```
+3.free_all_bootmem()释放所有的低区内存，从此以后bootmem不再使用：
+```
+/* clear the zero-page */ memset（empty_zero_page, 0, PAGE_SIZE）;
+/* this will put all low memory onto the freelists */
+totalram_pages += free_all_bootmem（）;
+reservedpages = 0;
+```
+4.查找mem_map，统计所保留的页面数。
+
+5.查找高区内存，把保留但不能使用的页面标记为PG_highmem，并调用__free_page()释放，并修改伙伴系统的位图。
+
+6.计算内核各个部分的大小，并打印统计信息。
+
+至此，内存初始化的主要部分就描述完毕了。但该阶段仅仅考虑了内核虚拟空间（3GB以上），还未涉及用户空间的管理。因此，该阶段中虚拟地址到物理地址的映射关系为线性关系。
 
 
